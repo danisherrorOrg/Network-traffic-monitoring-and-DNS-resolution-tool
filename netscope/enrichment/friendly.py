@@ -13,6 +13,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 import re
+from typing import Optional
 
 # (regex_pattern, friendly_name) — first match wins
 _RULES: list[tuple[re.Pattern, str]] = [
@@ -121,7 +122,7 @@ _RULES: list[tuple[re.Pattern, str]] = [
 ]
 
 
-def ptr_to_friendly(ptr: str) -> str | None:
+def ptr_to_friendly(ptr: str) -> Optional[str]:
     """
     Map a raw PTR hostname to a human-readable service name.
     Returns None if no rule matches — the raw PTR will be shown instead.

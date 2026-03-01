@@ -6,13 +6,14 @@
 
 import json
 import time
+from typing import Optional
 
 from netscope.state import state
 from netscope.enrichment import enrich_ip
 from netscope.enrichment.ptr import get_cache as get_ptr_cache
 
 
-def export_session(no_export: bool = False) -> str | None:
+def export_session(no_export: bool = False) -> Optional[str]:
     """
     Write the current session to a timestamped JSON file.
 

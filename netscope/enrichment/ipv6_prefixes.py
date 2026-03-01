@@ -9,6 +9,9 @@
 # Prefixes are matched case-insensitively from the start of the address.
 # ─────────────────────────────────────────────────────────────────────
 
+from typing import Optional
+
+
 _PREFIXES: list[tuple[str, str]] = [
     # ── CDNs ──────────────────────────────────────────────────────────
     ("2a04:4e42",   "Fastly CDN"),
@@ -55,7 +58,7 @@ _PREFIXES: list[tuple[str, str]] = [
 ]
 
 
-def lookup(ip: str) -> str | None:
+def lookup(ip: str) -> Optional[str]:
     """
     Match an IPv6 address against known provider prefixes.
     Returns the provider name or None if no match.

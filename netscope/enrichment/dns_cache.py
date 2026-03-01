@@ -9,6 +9,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 import threading
+from typing import Optional
 
 # ip → domain name seen in a DNS answer
 _cache: dict[str, str] = {}
@@ -45,7 +46,7 @@ def record_dns_answer(pkt) -> None:
         pass
 
 
-def lookup(ip: str) -> str | None:
+def lookup(ip: str) -> Optional[str]:
     """Return the domain name we saw in a DNS answer for this IP, or None."""
     with _lock:
         return _cache.get(ip)

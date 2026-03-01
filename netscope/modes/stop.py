@@ -12,12 +12,13 @@
 
 import signal
 import threading
+from typing import Optional
 
 # Global event — set by any stop trigger, watched by all modes
 _stop_event = threading.Event()
 
 
-def setup(duration: int | None = None) -> None:
+def setup_stop_event(duration: Optional[int]) -> None:
     """
     Register signal handlers and start the optional duration timer.
     Call once from main() before launching any output mode.

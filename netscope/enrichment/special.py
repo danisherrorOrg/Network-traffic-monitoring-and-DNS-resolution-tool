@@ -8,6 +8,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 import ipaddress
+from typing import Optional
 
 _SPECIAL_PREFIXES: list[tuple[str, str]] = [
     # IPv4
@@ -38,7 +39,7 @@ def _is_172_private(ip: str) -> bool:
         return False
 
 
-def special_label(ip: str) -> str | None:
+def special_label(ip: str) -> Optional[str]:
     """
     Return a human label if the IP is a reserved or special address.
     Returns None if the IP should proceed through the enrichment pipeline.

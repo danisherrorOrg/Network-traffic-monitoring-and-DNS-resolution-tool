@@ -92,7 +92,8 @@ def run_log(args) -> None:
     except KeyboardInterrupt:
         pass
 
-    print(f"\n{'\u2500' * 72}")
+    line = "─" * 72
+    print(f"\n{line}\n")
     snap = state.snapshot()
     print(
         f"Captured {snap['packet_count']:,} packets  |  "

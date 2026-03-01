@@ -31,7 +31,7 @@ def fmt_bytes(n: int) -> str:
     return f"{n:.1f} TB"
 
 
-def build(snap: dict, top_n: int) -> "Layout":
+def build_dashboard(snap: dict, top_n: int) -> "Layout":
     """
     Build the full Rich Layout from a TrafficState snapshot.
     Called every refresh cycle by run_dashboard().

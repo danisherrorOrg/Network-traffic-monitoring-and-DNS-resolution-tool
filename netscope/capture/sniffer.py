@@ -10,6 +10,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 import threading
+from typing import Optional
 
 from netscope.protocols import PROTO_NUM_MAP
 from netscope.state import state
@@ -18,15 +19,19 @@ from netscope.enrichment import dns_cache
 # ── Scapy imports (optional — checked at runtime) ────────────────────
 try:
     from scapy.all import sniff, IP, IPv6, TCP, UDP, ICMP, GRE, ESP, AH, SCTP
+
     try:
         from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply
     except ImportError:
         ICMPv6EchoRequest = ICMPv6EchoReply = None
+
     try:
         from scapy.layers.l2 import IGMP
     except ImportError:
         IGMP = None
+
     SCAPY_AVAILABLE = True
+
 except ImportError:
     SCAPY_AVAILABLE = False
 
@@ -94,7 +99,7 @@ def packet_handler(pkt) -> None:
 
 # ── Sniff thread ─────────────────────────────────────────────────────
 
-def _sniff_loop(interface: str | None) -> None:
+def _sniff_loop(interface: Optional[str]) -> None:
     """Background worker — runs until process exits."""
     kwargs: dict = dict(prn=packet_handler, store=False)
     if interface:
@@ -105,7 +110,7 @@ def _sniff_loop(interface: str | None) -> None:
         print(f"[netscope capture] ERROR: {e}")
 
 
-def start(interface: str | None = None) -> None:
+def start(interface: Optional[str]) -> None:
     """
     Launch packet capture in a background daemon thread.
     Call once from main() before starting any output mode.

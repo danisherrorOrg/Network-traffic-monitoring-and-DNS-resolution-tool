@@ -10,6 +10,7 @@
 
 import socket
 import threading
+from typing import Optional
 
 # ip → PTR hostname (empty string means lookup ran but found nothing)
 _cache:   dict[str, str] = {}
@@ -32,7 +33,7 @@ def _do_ptr(ip: str) -> None:
         _pending.discard(ip)
 
 
-def lookup(ip: str) -> str | None:
+def lookup(ip: str) -> Optional[str]:
     """
     Return the cached PTR hostname for this IP, or None if not yet resolved.
     Automatically schedules a background lookup on the first call per IP.
