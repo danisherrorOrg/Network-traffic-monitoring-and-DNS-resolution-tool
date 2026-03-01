@@ -14,6 +14,8 @@ Run with:
     sudo python3 network_monitor.py --top 20 --refresh 2
 """
 
+
+
 import argparse
 import socket
 import threading
