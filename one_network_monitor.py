@@ -628,6 +628,48 @@ def start_sniffing(interface: Optional[str] = None) -> None:
         print(f"[ERROR] Sniffing failed: {e}")
 
 
+
+# ─────────────────────────────────────────────
+#  Shared stop-event  (used by ALL modes)
+#  Handles: Ctrl+C · --duration timeout · SIGHUP · SIGTERM
+# ─────────────────────────────────────────────
+
+import signal as _signal
+import sys as _sys
+
+_stop_event = threading.Event()   # global — set by any stop trigger
+
+
+def _setup_stop_event(duration: Optional[int]) -> None:
+    """
+    Wire up every possible stop trigger to _stop_event.
+    Call this once in main() before launching any mode.
+    """
+
+    # SIGHUP — SSH session closed / terminal hung up
+    def _on_sighup(signum, frame):
+        _stop_event.set()
+    try:
+        _signal.signal(_signal.SIGHUP, _on_sighup)
+    except (OSError, AttributeError):
+        pass  # Windows has no SIGHUP
+
+    # SIGTERM — system shutdown or `kill <pid>`
+    def _on_sigterm(signum, frame):
+        _stop_event.set()
+    try:
+        _signal.signal(_signal.SIGTERM, _on_sigterm)
+    except (OSError, AttributeError):
+        pass
+
+    # --duration countdown
+    if duration:
+        def _timer():
+            _stop_event.wait(timeout=duration)
+            _stop_event.set()
+        threading.Thread(target=_timer, daemon=True).start()
+
+
 # ─────────────────────────────────────────────
 #  JSON export helper  (shared by all modes)
 # ─────────────────────────────────────────────
@@ -663,22 +705,23 @@ def export_session(no_export: bool) -> Optional[str]:
 def run_dashboard(args) -> None:
     """
     Full-screen Rich TUI. Best for local terminals.
-    Use Ctrl+C to stop; session is saved to JSON on exit.
+    Stops on Ctrl+C, --duration timeout, SIGHUP, or SIGTERM.
     """
     console = Console()
     try:
         with Live(console=console, refresh_per_second=1/args.refresh, screen=True) as live:
-            while True:
+            while not _stop_event.is_set():
                 live.update(build_dashboard(state.snapshot(), args.top))
                 time.sleep(args.refresh)
     except KeyboardInterrupt:
-        console.print("\n[bold yellow]Capture stopped.[/bold yellow]")
-        path = export_session(args.no_export)
-        if path:
-            console.print(
-                f"[green]✓ Session saved → [bold]{path}[/bold]  "
-                f"(drag into netscope_dashboard.html)[/green]"
-            )
+        pass
+    console.print("\n[bold yellow]Capture stopped.[/bold yellow]")
+    path = export_session(args.no_export)
+    if path:
+        console.print(
+            f"[green]✓ Session saved → [bold]{path}[/bold]  "
+            f"(drag into netscope_dashboard.html)[/green]"
+        )
 
 
 # ─────────────────────────────────────────────
@@ -721,20 +764,23 @@ def run_log(args) -> None:
 
     state.record = record_and_print  # monkey-patch for this mode
 
-    print(f"NetScope — log mode  |  interface: {args.interface or 'all'}  |  Ctrl+C to stop")
+    dur_hint = f"  |  stops in {args.duration}s" if args.duration else "  |  Ctrl+C to stop"
+    print(f"NetScope — log mode  |  interface: {args.interface or 'all'}{dur_hint}")
     print(f"{'─' * 72}")
 
     try:
-        while True:
-            time.sleep(1)
+        while not _stop_event.is_set():
+            time.sleep(0.5)
     except KeyboardInterrupt:
-        print(f"\n{'─' * 72}")
-        snap = state.snapshot()
-        print(f"Captured {snap['packet_count']:,} packets  |  {fmt_bytes(snap['byte_count'])}  |  "
-              f"{len(snap['hosts'])} hosts seen")
-        path = export_session(args.no_export)
-        if path:
-            print(f"Session saved → {path}")
+        pass
+
+    print(f"\n{'─' * 72}")
+    snap = state.snapshot()
+    print(f"Captured {snap['packet_count']:,} packets  |  {fmt_bytes(snap['byte_count'])}  |  "
+          f"{len(snap['hosts'])} hosts seen")
+    path = export_session(args.no_export)
+    if path:
+        print(f"Session saved → {path}")
 
 
 # ─────────────────────────────────────────────
@@ -744,68 +790,36 @@ def run_log(args) -> None:
 def run_quiet(args) -> None:
     """
     Silent capture — no output while running.
-    Stops via Ctrl+C, --duration timeout, or SIGHUP (SSH disconnect).
+    Stops via Ctrl+C, --duration timeout, SIGHUP, or SIGTERM.
     Always exports JSON before exiting.
 
-    Typical SSH usage:
-        # Run for 5 minutes in the background, survive disconnect:
+    SSH usage:
         nohup sudo python3 network_monitor.py --mode quiet --duration 300 &
         echo $! > netscope.pid
 
-        # Or use screen/tmux and detach freely:
+        # Or use screen/tmux:
         screen -dmS netscope sudo python3 network_monitor.py --mode quiet
     """
-    import sys
-    import signal
-
-    _stop_event = threading.Event()
-
-    # SIGHUP: SSH session closed / terminal hung up
-    # Without this, SIGHUP kills the process before the export runs.
-    def _on_sighup(signum, frame):
-        _stop_event.set()
-
-    try:
-        signal.signal(signal.SIGHUP, _on_sighup)
-    except (OSError, AttributeError):
-        pass  # Windows has no SIGHUP
-
-    # SIGTERM: system shutdown / kill command
-    def _on_sigterm(signum, frame):
-        _stop_event.set()
-
-    try:
-        signal.signal(signal.SIGTERM, _on_sigterm)
-    except (OSError, AttributeError):
-        pass
-
-    # Optional duration countdown
-    if args.duration:
-        def _timer():
-            _stop_event.wait(timeout=args.duration)
-            _stop_event.set()
-        threading.Thread(target=_timer, daemon=True).start()
-
-    # Main wait loop
+    # All stop triggers (duration, SIGHUP, SIGTERM) are already wired via
+    # _setup_stop_event() called in main() — just wait on the shared event.
     try:
         while not _stop_event.is_set():
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass  # Ctrl+C — fall through to export
 
-    # Always export before exiting
     path = export_session(args.no_export)
     snap = state.snapshot()
 
-    # Summary to stderr so path stays clean on stdout
+    # Summary → stderr so stdout stays clean for scripting
     print(
         f"netscope: {snap['packet_count']:,} packets  "
         f"{fmt_bytes(snap['byte_count'])}  "
         f"{len(snap['hosts'])} hosts seen",
-        file=sys.stderr,
+        file=_sys.stderr,
     )
     if path:
-        # Path to stdout — scripts can capture it:
+        # Path → stdout so scripts can capture it:
         # json=$(sudo python3 network_monitor.py --mode quiet --duration 60)
         print(path)
 
@@ -835,7 +849,9 @@ Examples:
   sudo python3 network_monitor.py --mode log
   sudo python3 network_monitor.py --mode log --interface wlan0 | grep Google
   sudo python3 network_monitor.py --mode quiet
-  sudo python3 network_monitor.py --mode quiet --duration 300
+  sudo python3 network_monitor.py --duration 300
+  sudo python3 network_monitor.py --mode log --duration 120
+  sudo python3 network_monitor.py --mode quiet --duration 600
   sudo python3 network_monitor.py --mode dashboard --top 20 --refresh 0.5
 
 SSH / headless usage:
@@ -873,7 +889,7 @@ SSH / headless usage:
     parser.add_argument(
         "--duration", "-d", type=int, default=None,
         metavar="SECONDS",
-        help="[quiet] Auto-stop after N seconds — useful for cron/SSH (e.g. --duration 300)",
+        help="Auto-stop after N seconds — works with all modes (e.g. --duration 300)",
     )
 
     args = parser.parse_args()
@@ -888,6 +904,7 @@ SSH / headless usage:
         print(f"[netscope] mode={args.mode}  interface={iface}  "
               f"enrichment=5-layer  storage=none")
 
+    _setup_stop_event(args.duration)
     threading.Thread(target=start_sniffing, args=(args.interface,), daemon=True).start()
 
     _MODES[args.mode](args)
