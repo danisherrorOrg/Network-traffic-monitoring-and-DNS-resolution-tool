@@ -629,32 +629,42 @@ def start_sniffing(interface: Optional[str] = None) -> None:
 
 
 # ─────────────────────────────────────────────
-#  Entry point
+#  JSON export helper  (shared by all modes)
 # ─────────────────────────────────────────────
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Real-time network monitor — shows WHO your machine is talking to"
-    )
-    parser.add_argument("--interface", "-i", default=None,
-                        help="Network interface (default: all)")
-    parser.add_argument("--top",       "-t", type=int,   default=15,
-                        help="Top N hosts to display (default: 15)")
-    parser.add_argument("--refresh",   "-r", type=float, default=1.0,
-                        help="Refresh interval in seconds (default: 1.0)")
-    args = parser.parse_args()
+def export_session(no_export: bool) -> Optional[str]:
+    """Serialize current state to a timestamped JSON file. Returns path or None."""
+    if no_export:
+        return None
+    snap = state.snapshot()
+    data = {
+        "packet_count": snap["packet_count"],
+        "byte_count":   snap["byte_count"],
+        "hosts": {
+            ip: {
+                **{k: list(v) if isinstance(v, set) else v for k, v in d.items()},
+                "hostname": enrich_ip(ip)[0],
+                "ptr":      _ptr_cache.get(ip, ""),
+            }
+            for ip, d in snap["hosts"].items()
+        },
+        "recent": snap["recent"],
+    }
+    out = f"netscope_{int(time.time())}.json"
+    with open(out, "w") as f:
+        json.dump(data, f, indent=2)
+    return out
 
-    if not SCAPY_AVAILABLE:
-        print("❌  scapy not found.  Run:  pip install scapy"); return
-    if not RICH_AVAILABLE:
-        print("❌  rich not found.   Run:  pip install rich");  return
 
-    print(f"[*] Capturing on {args.interface or 'all interfaces'}  (requires root/sudo)")
-    print("[*] Enrichment layers: special-IP → DNS sniff → PTR lookup → service name → IPv6 prefix")
-    print("[*] Nothing written to disk during capture\n")
+# ─────────────────────────────────────────────
+#  MODE 1 — dashboard  (Rich live TUI)
+# ─────────────────────────────────────────────
 
-    threading.Thread(target=start_sniffing, args=(args.interface,), daemon=True).start()
-
+def run_dashboard(args) -> None:
+    """
+    Full-screen Rich TUI. Best for local terminals.
+    Use Ctrl+C to stop; session is saved to JSON on exit.
+    """
     console = Console()
     try:
         with Live(console=console, refresh_per_second=1/args.refresh, screen=True) as live:
@@ -663,27 +673,224 @@ def main() -> None:
                 time.sleep(args.refresh)
     except KeyboardInterrupt:
         console.print("\n[bold yellow]Capture stopped.[/bold yellow]")
+        path = export_session(args.no_export)
+        if path:
+            console.print(
+                f"[green]✓ Session saved → [bold]{path}[/bold]  "
+                f"(drag into netscope_dashboard.html)[/green]"
+            )
+
+
+# ─────────────────────────────────────────────
+#  MODE 2 — log  (plain scrolling text)
+# ─────────────────────────────────────────────
+
+# Direction symbols for plain text
+_DIR_SYMBOL = {"OUT →": "↑", "IN  ←": "↓", "PASS": "↔"}
+
+def run_log(args) -> None:
+    """
+    Scrolling plain-text output — one line per packet.
+    SSH-safe, pipeable, works in any terminal.
+
+    Format:
+        HH:MM:SS  ↑/↓  PROTO  Service/IP → Service/IP  (NNN B)
+    """
+    # Register a per-packet callback that prints immediately
+    original_record = state.record
+
+    def record_and_print(src: str, dst: str, proto: str, size: int) -> None:
+        original_record(src, dst, proto, size)
+        # Resolve names for display (non-blocking — uses whatever is cached)
+        src_name, _ = enrich_ip(src)
+        dst_name, _ = enrich_ip(dst)
+        src_disp = src if src_name == "resolving…" else src_name
+        dst_disp = dst if dst_name == "resolving…" else dst_name
+
+        # Determine direction symbol from perspective of local machine
+        if src in state.local_ips:
+            sym = "↑"
+        elif dst in state.local_ips:
+            sym = "↓"
+        else:
+            sym = "↔"
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"{ts}  {sym}  {proto:<6}  {src_disp} → {dst_disp}  ({fmt_bytes(size)})",
+              flush=True)
+
+    state.record = record_and_print  # monkey-patch for this mode
+
+    print(f"NetScope — log mode  |  interface: {args.interface or 'all'}  |  Ctrl+C to stop")
+    print(f"{'─' * 72}")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print(f"\n{'─' * 72}")
         snap = state.snapshot()
-        export = {
-            "packet_count": snap["packet_count"],
-            "byte_count":   snap["byte_count"],
-            "hosts": {
-                ip: {
-                    **{k: list(v) if isinstance(v, set) else v for k, v in d.items()},
-                    "hostname": enrich_ip(ip)[0],
-                    "ptr":      _ptr_cache.get(ip, ""),
-                }
-                for ip, d in snap["hosts"].items()
-            },
-            "recent": snap["recent"],
-        }
-        out = f"netscope_{int(time.time())}.json"
-        with open(out, "w") as f:
-            json.dump(export, f, indent=2)
-        console.print(
-            f"[green]✓ Saved to [bold]{out}[/bold]  "
-            f"— drag into netscope_dashboard.html[/green]"
-        )
+        print(f"Captured {snap['packet_count']:,} packets  |  {fmt_bytes(snap['byte_count'])}  |  "
+              f"{len(snap['hosts'])} hosts seen")
+        path = export_session(args.no_export)
+        if path:
+            print(f"Session saved → {path}")
+
+
+# ─────────────────────────────────────────────
+#  MODE 3 — quiet  (silent capture)
+# ─────────────────────────────────────────────
+
+def run_quiet(args) -> None:
+    """
+    Silent capture — no output while running.
+    Stops via Ctrl+C, --duration timeout, or SIGHUP (SSH disconnect).
+    Always exports JSON before exiting.
+
+    Typical SSH usage:
+        # Run for 5 minutes in the background, survive disconnect:
+        nohup sudo python3 network_monitor.py --mode quiet --duration 300 &
+        echo $! > netscope.pid
+
+        # Or use screen/tmux and detach freely:
+        screen -dmS netscope sudo python3 network_monitor.py --mode quiet
+    """
+    import sys
+    import signal
+
+    _stop_event = threading.Event()
+
+    # SIGHUP: SSH session closed / terminal hung up
+    # Without this, SIGHUP kills the process before the export runs.
+    def _on_sighup(signum, frame):
+        _stop_event.set()
+
+    try:
+        signal.signal(signal.SIGHUP, _on_sighup)
+    except (OSError, AttributeError):
+        pass  # Windows has no SIGHUP
+
+    # SIGTERM: system shutdown / kill command
+    def _on_sigterm(signum, frame):
+        _stop_event.set()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (OSError, AttributeError):
+        pass
+
+    # Optional duration countdown
+    if args.duration:
+        def _timer():
+            _stop_event.wait(timeout=args.duration)
+            _stop_event.set()
+        threading.Thread(target=_timer, daemon=True).start()
+
+    # Main wait loop
+    try:
+        while not _stop_event.is_set():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass  # Ctrl+C — fall through to export
+
+    # Always export before exiting
+    path = export_session(args.no_export)
+    snap = state.snapshot()
+
+    # Summary to stderr so path stays clean on stdout
+    print(
+        f"netscope: {snap['packet_count']:,} packets  "
+        f"{fmt_bytes(snap['byte_count'])}  "
+        f"{len(snap['hosts'])} hosts seen",
+        file=sys.stderr,
+    )
+    if path:
+        # Path to stdout — scripts can capture it:
+        # json=$(sudo python3 network_monitor.py --mode quiet --duration 60)
+        print(path)
+
+
+# ─────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────
+
+_MODES = {
+    "dashboard": run_dashboard,
+    "log":       run_log,
+    "quiet":     run_quiet,
+}
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="NetScope — real-time network monitor showing WHO your machine talks to",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Output modes:
+  dashboard   Full-screen Rich TUI with live tables  (default)
+  log         Scrolling plain text — SSH / pipe friendly
+  quiet       Silent capture; prints JSON path on exit
+
+Examples:
+  sudo python3 network_monitor.py
+  sudo python3 network_monitor.py --mode log
+  sudo python3 network_monitor.py --mode log --interface wlan0 | grep Google
+  sudo python3 network_monitor.py --mode quiet
+  sudo python3 network_monitor.py --mode quiet --duration 300
+  sudo python3 network_monitor.py --mode dashboard --top 20 --refresh 0.5
+
+SSH / headless usage:
+  # Capture for 10 minutes in background, survive disconnect:
+  nohup sudo python3 network_monitor.py --mode quiet --duration 600 &
+
+  # Capture until you manually stop it (SIGHUP-safe):
+  nohup sudo python3 network_monitor.py --mode quiet &
+  kill $(cat netscope.pid)    # to stop it later
+
+  # Capture and immediately load in the HTML dashboard:
+  json=$(sudo python3 network_monitor.py --mode quiet --duration 60)
+  echo "Open netscope_dashboard.html and load: $json"
+
+  # Use screen so you can detach/reattach:
+  screen -dmS netscope sudo python3 network_monitor.py --mode quiet
+  screen -r netscope   # reattach later
+        """,
+    )
+
+    parser.add_argument(
+        "--mode", "-m",
+        choices=list(_MODES.keys()),
+        default="dashboard",
+        help="Output mode: dashboard | log | quiet  (default: dashboard)",
+    )
+    parser.add_argument("--interface", "-i", default=None,
+                        help="Network interface to capture on (default: all)")
+    parser.add_argument("--top",       "-t", type=int,   default=15,
+                        help="[dashboard] Top N hosts shown (default: 15)")
+    parser.add_argument("--refresh",   "-r", type=float, default=1.0,
+                        help="[dashboard] Refresh interval in seconds (default: 1.0)")
+    parser.add_argument("--no-export", action="store_true",
+                        help="Skip JSON export on exit")
+    parser.add_argument(
+        "--duration", "-d", type=int, default=None,
+        metavar="SECONDS",
+        help="[quiet] Auto-stop after N seconds — useful for cron/SSH (e.g. --duration 300)",
+    )
+
+    args = parser.parse_args()
+
+    if not SCAPY_AVAILABLE:
+        print("❌  scapy not found.  Run:  pip install scapy"); return
+    if args.mode == "dashboard" and not RICH_AVAILABLE:
+        print("❌  rich not found.   Run:  pip install rich");  return
+
+    iface = args.interface or "all interfaces"
+    if args.mode != "quiet":
+        print(f"[netscope] mode={args.mode}  interface={iface}  "
+              f"enrichment=5-layer  storage=none")
+
+    threading.Thread(target=start_sniffing, args=(args.interface,), daemon=True).start()
+
+    _MODES[args.mode](args)
 
 
 if __name__ == "__main__":
