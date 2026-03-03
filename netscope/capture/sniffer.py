@@ -19,19 +19,15 @@ from netscope.enrichment import dns_cache
 # ── Scapy imports (optional — checked at runtime) ────────────────────
 try:
     from scapy.all import sniff, IP, IPv6, TCP, UDP, ICMP, GRE, ESP, AH, SCTP
-
     try:
         from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply
     except ImportError:
         ICMPv6EchoRequest = ICMPv6EchoReply = None
-
     try:
         from scapy.layers.l2 import IGMP
     except ImportError:
         IGMP = None
-
     SCAPY_AVAILABLE = True
-
 except ImportError:
     SCAPY_AVAILABLE = False
 
@@ -75,12 +71,29 @@ def detect_protocol(pkt) -> str:
     return "OTHER"
 
 
-# ── Packet handler ───────────────────────────────────────────────────
+# ── Port extraction ────────────────────────────────────────────
+
+def extract_ports(pkt) -> tuple[int, int]:
+    """
+    Return (src_port, dst_port) for the packet.
+    Returns (0, 0) for portless protocols (ICMP, GRE, ESP, etc.)
+    so the flow 5-tuple is always valid.
+    """
+    if pkt.haslayer(TCP):
+        return pkt[TCP].sport, pkt[TCP].dport
+    if pkt.haslayer(UDP):
+        return pkt[UDP].sport, pkt[UDP].dport
+    if pkt.haslayer(SCTP):
+        return pkt[SCTP].sport, pkt[SCTP].dport
+    return 0, 0
+
+
+# ── Packet handler ────────────────────────────────────────────
 
 def packet_handler(pkt) -> None:
     """
     Called for every captured packet.
-    Feeds the DNS cache, extracts IPs, and records to state.
+    Feeds the DNS cache, extracts IPs + ports, and records to state.
     Never stores the packet itself.
     """
     # Feed DNS sniff cache (Layer 2 enrichment)
@@ -94,7 +107,8 @@ def packet_handler(pkt) -> None:
     else:
         return   # Not an IP packet (ARP, 802.1Q …) — skip
 
-    state.record(src, dst, detect_protocol(pkt), len(pkt))
+    src_port, dst_port = extract_ports(pkt)
+    state.record(src, src_port, dst, dst_port, detect_protocol(pkt), len(pkt))
 
 
 # ── Sniff thread ─────────────────────────────────────────────────────

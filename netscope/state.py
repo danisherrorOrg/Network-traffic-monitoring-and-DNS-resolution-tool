@@ -54,8 +54,21 @@ class TrafficState:
 
     # ── Write (called from capture thread) ───────────────────────────
 
-    def record(self, src: str, dst: str, proto: str, size: int) -> None:
-        """Record one packet. Called from the sniff thread — must be fast."""
+    def record(
+        self,
+        src: str, src_port: int,
+        dst: str, dst_port: int,
+        proto: str,
+        size: int,
+    ) -> None:
+        """
+        Record one packet. Called from the sniff thread — must be fast.
+
+        src_port / dst_port: use 0 for portless protocols (ICMP, GRE …)
+        """
+        # Import here to avoid circular import at module load time
+        from netscope.flows import flow_table
+
         now = datetime.now().strftime("%H:%M:%S")
         with self._lock:
             self.packet_count += 1
@@ -81,13 +94,18 @@ class TrafficState:
             self.recent.append({
                 "time":      now,
                 "src":       src,
+                "src_port":  src_port,
                 "dst":       dst,
+                "dst_port":  dst_port,
                 "protocol":  proto,
                 "size":      size,
                 "direction": direction,
             })
             if len(self.recent) > self.MAX_RECENT:
                 self.recent.pop(0)
+
+        # Update flow table outside the state lock to avoid lock ordering issues
+        flow_table.record(src, src_port, dst, dst_port, proto, size, self.local_ips)
 
     # ── Read (called from UI / export threads) ────────────────────────
 

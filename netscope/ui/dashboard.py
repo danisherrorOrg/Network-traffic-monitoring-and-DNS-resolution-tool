@@ -5,8 +5,11 @@
 # No I/O, no threading — pure layout construction.
 # ─────────────────────────────────────────────────────────────────────
 
+from typing import Optional
+
 from netscope.enrichment import enrich_ip
 from netscope.enrichment.ptr import get_cache as get_ptr_cache
+from netscope.flows import flow_table, fmt_duration
 from netscope.protocols import PROTOCOL_META
 
 try:
@@ -31,7 +34,7 @@ def fmt_bytes(n: int) -> str:
     return f"{n:.1f} TB"
 
 
-def build_dashboard(snap: dict, top_n: int) -> "Layout":
+def build_dashboard(snap: dict, top_n: int, flows: Optional[list]) -> "Layout":
     """
     Build the full Rich Layout from a TrafficState snapshot.
     Called every refresh cycle by run_dashboard().
@@ -45,6 +48,10 @@ def build_dashboard(snap: dict, top_n: int) -> "Layout":
     )
     layout["body"].split_row(
         Layout(name="hosts",  ratio=3),
+        Layout(name="right",  ratio=2),
+    )
+    layout["right"].split_column(
+        Layout(name="flows",  ratio=3),
         Layout(name="recent", ratio=2),
     )
 
@@ -55,7 +62,8 @@ def build_dashboard(snap: dict, top_n: int) -> "Layout":
     hdr.append("⬡  NETWORK TRAFFIC MONITOR  ⬡", style="bold cyan")
     hdr.append(
         f"   packets: {snap['packet_count']:,}  │  data: {fmt_bytes(snap['byte_count'])}"
-        f"  │  uptime: {hh:02d}:{mm:02d}:{ss:02d}  │  hosts: {len(snap['hosts'])}",
+        f"  │  uptime: {hh:02d}:{mm:02d}:{ss:02d}  │  hosts: {len(snap['hosts'])}"
+        f"  │  flows: {snap.get('flow_stats', {}).get('active', 0)} active",
         style="dim",
     )
     layout["header"].update(Panel(hdr, style="bold blue"))
@@ -102,6 +110,51 @@ def build_dashboard(snap: dict, top_n: int) -> "Layout":
         )
 
     layout["hosts"].update(Panel(tbl, title="[bold]🌐 Hosts", border_style="cyan"))
+
+
+    # ── Flows table ───────────────────────────────────────────────
+    ft = Table(
+        title="Active Flows",
+        box=box.SIMPLE_HEAD, style="magenta",
+        header_style="bold magenta", expand=True,
+    )
+    ft.add_column("Connection",  style="bold white", no_wrap=True, min_width=28)
+    ft.add_column("Svc",         style="cyan",   width=12)
+    ft.add_column("Dir",         width=4)
+    ft.add_column("Proto",       width=6)
+    ft.add_column("Bytes",       justify="right", style="green")
+    ft.add_column("Pkts",        justify="right", style="yellow")
+    ft.add_column("Duration",    justify="right", style="dim")
+
+    for flow in (flows or []):
+        remote_name, _ = enrich_ip(flow.remote_ip)
+        if remote_name == "resolving…":
+            remote_name = flow.remote_ip
+
+        # Truncate long names so the table stays readable
+        if len(remote_name) > 26:
+            remote_name = remote_name[:24] + "…"
+
+        svc   = flow.service_label()
+        proto_colour = {"TCP": "cyan", "UDP": "yellow", "SCTP": "blue"}.get(flow.proto, "dim")
+        dir_symbol   = "↑" if flow.direction == "OUT" else "↓"
+        dir_colour   = "red"   if flow.direction == "OUT" else "blue"
+        dur   = fmt_duration(flow.duration)
+
+        name_style = "dim" if flow.ended else "bold white"
+        row_suf    = " [dim](idle)[/dim]" if flow.ended else ""
+
+        ft.add_row(
+            Text(remote_name + row_suf, style=name_style),
+            svc,
+            Text(dir_symbol, style=dir_colour),
+            f"[{proto_colour}]{flow.proto}[/{proto_colour}]",
+            fmt_bytes(flow.bytes),
+            str(flow.packets),
+            dur,
+        )
+
+    layout["flows"].update(Panel(ft, title="[bold]🔄 Flows", border_style="magenta"))
 
     # ── Recent feed ──────────────────────────────────────────────────
     rt = Table(
